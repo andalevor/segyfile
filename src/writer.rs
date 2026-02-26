@@ -38,7 +38,7 @@ struct WrtFun {
     write_i8: fn(&mut [u8], i8) -> &mut [u8],
 }
 
-impl<T: Primitive + Clone + Copy> Writer<T> {
+impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
     pub fn create(
         path: &str,
         txt_hdr: &[u8; TEXT_HEADER_SIZE],
@@ -184,10 +184,10 @@ impl<T: Primitive + Clone + Copy> Writer<T> {
             max_add_trc_hdrs: bin_hdr.max_add_trc_hdrs,
         })
     }
-    pub fn close(self) {}
+    pub fn close(self) {} // drop file
     pub fn write_one_trace<U: Primitive + Copy>(
         &mut self,
-        hdr_names: &Vec<i32>,
+        hdr_names: &[i32],
         hdr_vals: &Vec<U>,
         samples: &Vec<T>,
     ) -> Result<(), Error> {
@@ -210,7 +210,7 @@ impl<T: Primitive + Clone + Copy> Writer<T> {
             };
         }
         self.file.write_all(&self.hdr_buf)?;
-        if self.samp_buf.len() / 4 != samples.len() {
+        if self.samp_buf.len() / self.bytes_per_sample != samples.len() {
             self.samp_buf
                 .resize(samples.len() * self.bytes_per_sample, 0u8);
         }
@@ -218,6 +218,7 @@ impl<T: Primitive + Clone + Copy> Writer<T> {
         for samp in samples {
             ptr = (self.write_one_sample)(&self.wrt_fun, ptr, *samp);
         }
+        self.file.write_all(&self.samp_buf)?;
         Ok(())
     }
     pub fn write_traces<U: Primitive + Copy>(
@@ -275,6 +276,9 @@ impl<T: Primitive + Clone + Copy> Writer<T> {
         Ok(())
     }
     fn sample_as_ibm<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+        if val == T::from_i32(0) {
+            return (wrt_fun.write_u32)(buf, 0);
+        }
         let val = T::as_f64(val);
         let sign: u32 = if val < 0.0 { 1 } else { 0 };
         let val = val.abs();

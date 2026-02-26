@@ -5,10 +5,12 @@ use std::str;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+    IncorrectSegyFormat(),
     UnsupportedEndianness(u32),
     UnsupportedFormatCode(i16),
     Utf8(str::Utf8Error),
     UnsupportedNumberOfStanzas(i32),
+    NoSuchHeader(i32),
     TraceHeaderMap(i32),
     ZeroSampleInterval(),
     ZeroSampleNumber(),
@@ -21,6 +23,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(e) => write!(f, "IO error: {}", e),
+            Error::IncorrectSegyFormat() => write!(f, "Incorrect SEGY format."),
             Error::UnsupportedEndianness(v) => {
                 write!(f, "Unsupported endianness in binary header: {:X}", v)
             }
@@ -36,6 +39,13 @@ impl fmt::Display for Error {
             }
             Error::UnsupportedNumberOfStanzas(v) => {
                 write!(f, "Unsupported number of trailer stanzas: {}", v)
+            }
+            Error::NoSuchHeader(hdr_name) => {
+                write!(
+                    f,
+                    "Requested trace header doesn't exist in trace header map: {}",
+                    hdr_name
+                )
             }
             Error::TraceHeaderMap(hdr_name) => {
                 write!(

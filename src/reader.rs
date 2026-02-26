@@ -76,7 +76,7 @@ impl<T: Primitive + Clone> Reader<T> {
         let read_u8 = read_u8;
         let read_i8 = read_i8;
         let mut ptr = &bin_buf[..];
-        let mut ptr2 = &bin_buf[300..];
+        let mut ptr2 = &bin_buf[300..]; // to skip unused header space
         let bh = BinaryHeader {
             job_id: read_i32(&mut ptr),
             line_num: read_i32(&mut ptr),
@@ -191,7 +191,7 @@ impl<T: Primitive + Clone> Reader<T> {
             hdr_buf,
         })
     }
-    pub fn close(self) {}
+    pub fn close(self) {} // drop file
     pub fn read_raw_text_header(&mut self) -> io::Result<[u8; TEXT_HEADER_SIZE]> {
         self.file.seek(io::SeekFrom::Start(0))?;
         let mut buf = [0u8; TEXT_HEADER_SIZE];
@@ -214,6 +214,9 @@ impl<T: Primitive + Clone> Reader<T> {
     ) -> Result<(Vec<Vec<U>>, Vec<Vec<T>>), Error> {
         let hdr_map = std_trc_hdr_map();
         for hn in hdr_names {
+            if hdr_map.contains_key(hn) == false {
+                return Err(Error::NoSuchHeader(*hn));
+            }
             let (format, offset) = hdr_map[&hn];
             let format_size = match format {
                 TrcHdrFmt::I8 | TrcHdrFmt::U8 => 1,
@@ -272,6 +275,9 @@ impl<T: Primitive + Clone> Reader<T> {
         self.rewind()?;
         let hdr_map = std_trc_hdr_map();
         for hn in hdr_names {
+            if hdr_map.contains_key(hn) == false {
+                return Err(Error::NoSuchHeader(*hn));
+            }
             let (format, offset) = hdr_map[&hn];
             let format_size = match format {
                 TrcHdrFmt::I8 | TrcHdrFmt::U8 => 1,
@@ -589,9 +595,6 @@ impl<T: Primitive + Clone> Reader<T> {
         hdr_names: &[i32],
     ) -> Result<Vec<Vec<U>>, Error> {
         let mut res = Vec::new();
-        for _ in hdr_names {
-            res.push(Vec::new());
-        }
         while reader.cur_pos != reader.end_of_data_pos {
             let hdr_map = std_trc_hdr_map();
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::SAMP_NUM];
@@ -727,6 +730,9 @@ fn get_end_of_data_pos(file: &mut File, trailer_stanzas_num: i32) -> Result<u64,
         // TODO: add support of variable number of trailer stanzas
         return Err(Error::UnsupportedNumberOfStanzas(trailer_stanzas_num));
     } else {
+        if trailer_stanzas_num < 0 {
+            return Err(Error::IncorrectSegyFormat());
+        }
         pos -= trailer_stanzas_num as u64 * TEXT_HEADER_SIZE as u64;
     }
     Ok(pos)
@@ -739,6 +745,7 @@ fn get_first_trace_pos(file: &mut File, ext_txt_hdrs_num: i16) -> Result<u64, Er
         let mut buf = [0u8; TEXT_HEADER_SIZE];
         loop {
             file.read_exact(&mut buf)?;
+            pos += TEXT_HEADER_SIZE as u64;
             let hdr = str::from_utf8(&buf)?;
             if hdr.starts_with("((SEG: EndText))") {
                 break;

@@ -2,7 +2,7 @@ use crate::trc_hdr_names;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BinaryHeader {
     pub job_id: i32,
     pub line_num: i32,
@@ -261,7 +261,7 @@ pub fn std_trc_hdr_map() -> &'static HashMap<i32, (TrcHdrFmt, i32)> {
             (trc_hdr_names::EXT_FFID, (TrcHdrFmt::I64, 256)),
             (trc_hdr_names::EXT_ENS_NO, (TrcHdrFmt::I64, 264)),
             (trc_hdr_names::EXT_R_ELEV, (TrcHdrFmt::F64, 272)),
-            (trc_hdr_names::EXT_S_DEPTH, (TrcHdrFmt::F64, 280)),
+            (trc_hdr_names::R_DEPTH, (TrcHdrFmt::F64, 280)),
             (trc_hdr_names::EXT_S_ELEV, (TrcHdrFmt::F64, 288)),
             (trc_hdr_names::EXT_S_DEPTH, (TrcHdrFmt::F64, 296)),
             (trc_hdr_names::EXT_R_DATUM, (TrcHdrFmt::F64, 304)),
