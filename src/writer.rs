@@ -275,6 +275,84 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
         }
         Ok(())
     }
+    pub fn write_traces_1d<U: Primitive + Copy>(
+        &mut self,
+        hdr_names: &[i32],
+        data: (&Vec<U>, &Vec<T>),
+    ) -> Result<(), Error> {
+        let trc_num = data.0.len() / hdr_names.len();
+        let hdr_size = hdr_names.len();
+        let samp_num = self.samp_buf.len() / self.bytes_per_sample;
+        if data.0.len() % hdr_names.len() != 0
+            || data.1.len() % samp_num != 0
+            || trc_num != data.1.len() / samp_num
+        {
+            return Err(Error::WriteDim1d());
+        }
+        let hdr_map = std_trc_hdr_map();
+        for i in 0..hdr_names.len() {
+            let (hdr_fmt, offset) = hdr_map[&hdr_names[i]];
+            let format_size = match hdr_fmt {
+                TrcHdrFmt::I8 | TrcHdrFmt::U8 => 1,
+                TrcHdrFmt::I16 | TrcHdrFmt::U16 => 2,
+                TrcHdrFmt::I32 | TrcHdrFmt::U32 | TrcHdrFmt::F32 => 4,
+                TrcHdrFmt::I64 | TrcHdrFmt::U64 | TrcHdrFmt::F64 => 8,
+            };
+            if offset + format_size > (self.max_add_trc_hdrs + 1) * TRACE_HEADER_SIZE as i32 {
+                return Err(Error::TraceHeaderMap(i as i32));
+            }
+        }
+        let hdr_vals = data.0;
+        let samples = data.1;
+        for i in 0..trc_num {
+            for (j, hn) in hdr_names.iter().enumerate() {
+                let (fmt, offset) = hdr_map[hn];
+                let offset = offset as usize;
+                let ptr = &mut self.hdr_buf[offset..];
+                _ = match fmt {
+                    TrcHdrFmt::I8 => {
+                        (self.wrt_fun.write_i8)(ptr, U::as_i8(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::I16 => {
+                        (self.wrt_fun.write_i16)(ptr, U::as_i16(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::I32 => {
+                        (self.wrt_fun.write_i32)(ptr, U::as_i32(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::I64 => {
+                        (self.wrt_fun.write_i64)(ptr, U::as_i64(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::U8 => {
+                        (self.wrt_fun.write_u8)(ptr, U::as_u8(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::U16 => {
+                        (self.wrt_fun.write_u16)(ptr, U::as_u16(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::U32 => {
+                        (self.wrt_fun.write_u32)(ptr, U::as_u32(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::U64 => {
+                        (self.wrt_fun.write_u64)(ptr, U::as_u64(hdr_vals[j + i * hdr_size]))
+                    }
+                    TrcHdrFmt::F32 => (self.wrt_fun.write_u32)(
+                        ptr,
+                        U::as_f32(hdr_vals[j + i * hdr_size]).to_bits(),
+                    ),
+                    TrcHdrFmt::F64 => (self.wrt_fun.write_u64)(
+                        ptr,
+                        U::as_f64(hdr_vals[j + i * hdr_size]).to_bits(),
+                    ),
+                };
+            }
+            self.file.write_all(&self.hdr_buf)?;
+            let mut ptr = &mut self.samp_buf[..];
+            for j in 0..samp_num {
+                ptr = (self.write_one_sample)(&self.wrt_fun, ptr, samples[j + i * samp_num]);
+            }
+            self.file.write_all(&self.samp_buf)?;
+        }
+        Ok(())
+    }
     fn sample_as_ibm<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
         if val == T::from_i32(0) {
             return (wrt_fun.write_u32)(buf, 0);
@@ -455,6 +533,34 @@ mod tests {
             .expect("Error on created file reading while check.");
         assert_eq!(ref_file, created);
         std::fs::remove_file("samples/test_trc_wrt.sgy").expect("Error on file deleting");
+    }
+    #[test]
+    fn test_write_traces_1d() {
+        let mut isgy = crate::reader::Reader::<f32>::open("samples/ieee_single.sgy")
+            .expect("Problem opening file for reading");
+        let txt_hdr = isgy
+            .read_raw_text_header()
+            .expect("Error on text header reading");
+        let hdr_names: Vec<i32> = (0..90).collect();
+        let (headers, samples) = isgy
+            .read_traces_1d::<i32>(&hdr_names)
+            .expect("Error on trace reading");
+        let mut osgy = Writer::<f32>::create(
+            "samples/test_trc_wrt_1d.sgy",
+            &txt_hdr,
+            isgy.get_binary_header().clone(),
+        )
+        .expect("Problem creating file for writing");
+        osgy.write_traces_1d(&hdr_names, (&headers, &samples))
+            .expect("Error on traces writing");
+        osgy.close();
+        isgy.close();
+        let ref_file = std::fs::read("samples/ieee_single.sgy")
+            .expect("Error on reference file reading while check.");
+        let created = std::fs::read("samples/test_trc_wrt_1d.sgy")
+            .expect("Error on created file reading while check.");
+        assert_eq!(ref_file, created);
+        std::fs::remove_file("samples/test_trc_wrt_1d.sgy").expect("Error on file deleting");
     }
     #[test]
     fn test_write_i8() {

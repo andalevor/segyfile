@@ -17,6 +17,8 @@ pub enum Error {
     WrongFormatForRevision(i16),
     UnsupportedRevision(u8),
     DiffDimToWrite(),
+    NotFixLen(),
+    WriteDim1d(),
 }
 
 impl fmt::Display for Error {
@@ -68,6 +70,20 @@ impl fmt::Display for Error {
             }
             Error::DiffDimToWrite() => {
                 write!(f, "Size of vectors passed to write is different.")
+            }
+            Error::NotFixLen() => {
+                write!(
+                    f,
+                    "This function could be called only for fixed trace length files."
+                )
+            }
+            Error::WriteDim1d() => {
+                write!(
+                    f,
+                    "Data should be rectangular. The lenghth of header vector do not 
+                    correpond to hdr_names length or the length of samples vector do
+                    not correpond to number of samples in binary header."
+                )
             }
         }
     }
