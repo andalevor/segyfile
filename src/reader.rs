@@ -8,11 +8,19 @@ use crate::utils::ebcdic_to_ascii;
 use std::fs::File;
 use std::io::{self, Read, Seek};
 
-macro_rules! read {
+macro_rules! read_le {
     ( $T:ty, $A:expr ) => {{
         let (int_bytes, rest) = $A.split_at(size_of::<$T>());
         *$A = rest;
         <$T>::from_le_bytes(int_bytes.try_into().unwrap())
+    }};
+}
+
+macro_rules! read_be {
+    ( $T:ty, $A:expr ) => {{
+        let (int_bytes, rest) = $A.split_at(size_of::<$T>());
+        *$A = rest;
+        <$T>::from_be_bytes(int_bytes.try_into().unwrap())
     }};
 }
 
@@ -47,7 +55,7 @@ impl<T: Primitive + Clone> Reader<T> {
         file.seek(io::SeekFrom::Start(TEXT_HEADER_SIZE as u64))?;
         let mut bin_buf = [0u8; BIN_HEADER_SIZE];
         file.read_exact(&mut bin_buf)?;
-        let endianness = read!(u32, &mut &bin_buf[96..96 + 4]);
+        let endianness = read_le!(u32, &mut &bin_buf[96..96 + 4]);
         let (read_u64, read_u32, read_u24, read_u16, read_i64, read_i32, read_i24, read_i16): (
             fn(&mut &[u8]) -> u64,
             fn(&mut &[u8]) -> u32,
@@ -826,60 +834,58 @@ fn get_first_trace_pos(file: &mut File, ext_txt_hdrs_num: i16) -> Result<u64, Er
     Ok(pos)
 }
 fn read_i8(buf: &mut &[u8]) -> i8 {
-    read!(i8, buf)
+    read_le!(i8, buf)
 }
 fn read_u8(buf: &mut &[u8]) -> u8 {
-    read!(u8, buf)
+    read_le!(u8, buf)
 }
 fn read_i16(buf: &mut &[u8]) -> i16 {
-    read!(i16, buf)
+    read_le!(i16, buf)
 }
 fn read_u16(buf: &mut &[u8]) -> u16 {
-    read!(u16, buf)
+    read_le!(u16, buf)
 }
 fn read_i24(buf: &mut &[u8]) -> i32 {
-    ((read!(u16, buf) as u32) | (read!(u8, buf) as u32) << 16) as i32
+    ((read_le!(u16, buf) as u32) | (read_le!(u8, buf) as u32) << 16) as i32
 }
 fn read_u24(buf: &mut &[u8]) -> u32 {
-    (read!(u16, buf) as u32) | (read!(u8, buf) as u32) << 16
+    (read_le!(u16, buf) as u32) | (read_le!(u8, buf) as u32) << 16
 }
 fn read_i32(buf: &mut &[u8]) -> i32 {
-    read!(i32, buf)
+    read_le!(i32, buf)
 }
 fn read_u32(buf: &mut &[u8]) -> u32 {
-    read!(u32, buf)
+    read_le!(u32, buf)
 }
 fn read_i64(buf: &mut &[u8]) -> i64 {
-    read!(i64, buf)
+    read_le!(i64, buf)
 }
 fn read_u64(buf: &mut &[u8]) -> u64 {
-    read!(u64, buf)
+    read_le!(u64, buf)
 }
 fn read_i16_sw(buf: &mut &[u8]) -> i16 {
-    read!(i16, buf).swap_bytes()
+    read_be!(i16, buf)
 }
 fn read_u16_sw(buf: &mut &[u8]) -> u16 {
-    read!(u16, buf).swap_bytes()
+    read_be!(u16, buf)
 }
 fn read_i24_sw(buf: &mut &[u8]) -> i32 {
-    let tmp = (read!(u16, buf) as u32) | (read!(u8, buf) as u32) << 16;
-    (tmp.swap_bytes() >> 8) as i32
+    ((read_be!(u16, buf) as u32) << 8 | read_be!(u8, buf) as u32) as i32
 }
 fn read_u24_sw(buf: &mut &[u8]) -> u32 {
-    let tmp = (read!(u16, buf) as u32) | (read!(u8, buf) as u32) << 16;
-    tmp.swap_bytes() >> 8
+    (read_be!(u16, buf) as u32) << 8 | read_be!(u8, buf) as u32
 }
 fn read_i32_sw(buf: &mut &[u8]) -> i32 {
-    read!(i32, buf).swap_bytes()
+    read_be!(i32, buf)
 }
 fn read_u32_sw(buf: &mut &[u8]) -> u32 {
-    read!(u32, buf).swap_bytes()
+    read_be!(u32, buf)
 }
 fn read_i64_sw(buf: &mut &[u8]) -> i64 {
-    read!(i64, buf).swap_bytes()
+    read_be!(i64, buf)
 }
 fn read_u64_sw(buf: &mut &[u8]) -> u64 {
-    read!(u64, buf).swap_bytes()
+    read_be!(u64, buf)
 }
 
 #[cfg(test)]

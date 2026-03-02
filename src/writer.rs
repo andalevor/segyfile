@@ -6,10 +6,19 @@ use crate::error::Error;
 use std::fs::File;
 use std::io::Write;
 
-macro_rules! write {
+macro_rules! write_le {
     ($buf:expr, $value:expr) => {{
         let size = std::mem::size_of_val(&$value);
-        let bytes = $value.to_ne_bytes();
+        let bytes = $value.to_le_bytes();
+        $buf[..size].copy_from_slice(&bytes);
+        &mut $buf[size..]
+    }};
+}
+
+macro_rules! write_be {
+    ($buf:expr, $value:expr) => {{
+        let size = std::mem::size_of_val(&$value);
+        let bytes = $value.to_be_bytes();
         $buf[..size].copy_from_slice(&bytes);
         &mut $buf[size..]
     }};
@@ -442,64 +451,62 @@ fn check_bin_hdr(bh: &BinaryHeader) -> Result<(), Error> {
 }
 
 fn write_i8(buf: &mut [u8], val: i8) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_u8(buf: &mut [u8], val: u8) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_i16(buf: &mut [u8], val: i16) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_u16(buf: &mut [u8], val: u16) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_i24(buf: &mut [u8], val: i32) -> &mut [u8] {
-    let tmp = write!(buf, (val & 0xffff) as u16);
-    write!(tmp, ((val & 0xff0000) >> 16) as u8)
+    let tmp = write_le!(buf, (val & 0xffff) as u16);
+    write_le!(tmp, ((val & 0xff0000) >> 16) as u8)
 }
 fn write_u24(buf: &mut [u8], val: u32) -> &mut [u8] {
-    let tmp = write!(buf, (val & 0xffff) as u16);
-    write!(tmp, ((val & 0xff0000) >> 16) as u8)
+    let tmp = write_le!(buf, (val & 0xffff) as u16);
+    write_le!(tmp, ((val & 0xff0000) >> 16) as u8)
 }
 fn write_i32(buf: &mut [u8], val: i32) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_u32(buf: &mut [u8], val: u32) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_i64(buf: &mut [u8], val: i64) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_u64(buf: &mut [u8], val: u64) -> &mut [u8] {
-    write!(buf, val)
+    write_le!(buf, val)
 }
 fn write_i16_sw(buf: &mut [u8], val: i16) -> &mut [u8] {
-    write!(buf, val.swap_bytes())
+    write_be!(buf, val)
 }
 fn write_u16_sw(buf: &mut [u8], val: u16) -> &mut [u8] {
-    write!(buf, val.swap_bytes())
+    write_be!(buf, val)
 }
 fn write_i24_sw(buf: &mut [u8], val: i32) -> &mut [u8] {
-    let tmp = val.swap_bytes() >> 8;
-    let tmp_buf = write!(buf, (tmp & 0xffff) as u16);
-    write!(tmp_buf, ((tmp & 0xff0000) >> 16) as u8)
+    let tmp_buf = write_be!(buf, ((val & 0xff0000) >> 16) as u8);
+    write_be!(tmp_buf, (val & 0xffff) as u16)
 }
 fn write_u24_sw(buf: &mut [u8], val: u32) -> &mut [u8] {
-    let tmp = val.swap_bytes() >> 8;
-    let tmp_buf = write!(buf, (tmp & 0xffff) as u16);
-    write!(tmp_buf, ((tmp & 0xff0000) >> 16) as u8)
+    let tmp_buf = write_be!(buf, ((val & 0xff0000) >> 16) as u8);
+    write_be!(tmp_buf, (val & 0xffff) as u16)
 }
 fn write_i32_sw(buf: &mut [u8], val: i32) -> &mut [u8] {
-    write!(buf, val.swap_bytes())
+    write_be!(buf, val)
 }
 fn write_u32_sw(buf: &mut [u8], val: u32) -> &mut [u8] {
-    write!(buf, val.swap_bytes())
+    write_be!(buf, val)
 }
 fn write_i64_sw(buf: &mut [u8], val: i64) -> &mut [u8] {
-    write!(buf, val.swap_bytes())
+    write_be!(buf, val)
 }
 fn write_u64_sw(buf: &mut [u8], val: u64) -> &mut [u8] {
-    write!(buf, val.swap_bytes())
+    write_be!(buf, val)
 }
 
 #[cfg(test)]
