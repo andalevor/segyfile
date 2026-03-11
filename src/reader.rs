@@ -24,7 +24,13 @@ macro_rules! read_be {
     }};
 }
 
-pub struct Reader<T> {
+struct GenReaders<T> {
+    skip_headers: fn(&mut Reader) -> Result<(), Error>,
+    read_samples: fn(&mut Reader, fn(&Reader, &mut &[u8]) -> T) -> Result<Vec<T>, Error>,
+    read_one_sample: fn(&Reader, &mut &[u8]) -> T,
+}
+
+pub struct Reader {
     bh: BinaryHeader,
     file: File,
     read_u64: fn(&mut &[u8]) -> u64,
@@ -37,9 +43,6 @@ pub struct Reader<T> {
     read_i24: fn(&mut &[u8]) -> i32,
     read_i16: fn(&mut &[u8]) -> i16,
     read_i8: fn(&mut &[u8]) -> i8,
-    skip_headers: fn(&mut Reader<T>) -> Result<(), Error>,
-    read_samples: fn(&mut Reader<T>) -> Result<Vec<T>, Error>,
-    read_one_sample: fn(&Reader<T>, &mut &[u8]) -> T,
     bytes_per_sample: i32,
     samp_num: i32,
     first_trc_pos: u64,
@@ -49,7 +52,7 @@ pub struct Reader<T> {
     hdr_buf: Vec<u8>,
 }
 
-impl<T: Primitive + Clone> Reader<T> {
+impl Reader {
     pub fn open(path: &str) -> Result<Self, Error> {
         let mut file = File::open(path)?;
         file.seek(io::SeekFrom::Start(TEXT_HEADER_SIZE as u64))?;
@@ -131,21 +134,10 @@ impl<T: Primitive + Clone> Reader<T> {
             byte_off_of_first_trc: read_u64(&mut ptr2),
             trailer_stanza_num: read_i32(&mut ptr2),
         };
-        let read_one_sample = match bh.format_code {
-            1 => Reader::sample_from_ibm_float,
-            2 => Reader::sample_from_i32,
-            3 => Reader::sample_from_i16,
-            5 => Reader::sample_from_ieee_float,
-            6 => Reader::sample_from_ieee_double,
-            7 => Reader::sample_from_i24,
-            8 => Reader::sample_from_i8,
-            9 => Reader::sample_from_i64,
-            10 => Reader::sample_from_u32,
-            11 => Reader::sample_from_u16,
-            12 => Reader::sample_from_u64,
-            15 => Reader::sample_from_u24,
-            16 => Reader::sample_from_u8,
-            _ => return Err(Error::UnsupportedFormatCode(bh.format_code)),
+        let samp_num = if bh.ext_samp_num != 0 {
+            bh.ext_samp_num
+        } else {
+            bh.samp_num as i32
         };
         let bytes_per_sample = match bh.format_code {
             8 | 16 => 1,
@@ -154,21 +146,6 @@ impl<T: Primitive + Clone> Reader<T> {
             1 | 2 | 5 | 10 => 4,
             6 | 9 | 12 => 8,
             _ => return Err(Error::UnsupportedFormatCode(bh.format_code)),
-        };
-        let samp_num = if bh.ext_samp_num != 0 {
-            bh.ext_samp_num
-        } else {
-            bh.samp_num as i32
-        };
-        let read_samples = if bh.fix_length_trc_flag == 1 || bh.segy_maj_ver == 0 {
-            Reader::read_samples_fix
-        } else {
-            Reader::read_samples_var
-        };
-        let skip_headers = if bh.fix_length_trc_flag == 1 || bh.segy_maj_ver == 0 {
-            Reader::skip_headers_fix
-        } else {
-            Reader::skip_headers_var
         };
         let end_of_data_pos = get_end_of_data_pos(&mut file, bh.trailer_stanza_num)?;
         let first_trc_pos = get_first_trace_pos(&mut file, bh.ext_text_hdrs_num)?;
@@ -187,9 +164,6 @@ impl<T: Primitive + Clone> Reader<T> {
             read_i24,
             read_i16,
             read_i8,
-            skip_headers,
-            read_samples,
-            read_one_sample,
             bytes_per_sample,
             samp_num,
             first_trc_pos,
@@ -216,7 +190,7 @@ impl<T: Primitive + Clone> Reader<T> {
     pub fn get_binary_header(&self) -> &BinaryHeader {
         &self.bh
     }
-    pub fn read_traces<U: Primitive>(
+    pub fn read_traces<U: Primitive, T: Primitive + Clone>(
         &mut self,
         hdr_names: &[i32],
     ) -> Result<(Vec<Vec<U>>, Vec<Vec<T>>), Error> {
@@ -245,31 +219,33 @@ impl<T: Primitive + Clone> Reader<T> {
                 0u8,
             );
             if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
-                Reader::<T>::read_header_by_group_fix::<U>
+                Reader::read_header_by_group_fix::<U>
             } else {
-                Reader::<T>::read_header_by_group_var::<U>
+                Reader::read_header_by_group_var::<U>
             }
         } else {
             if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
-                Reader::<T>::read_header_by_one_fix::<U>
+                Reader::read_header_by_one_fix::<U>
             } else {
-                Reader::<T>::read_header_by_one_var::<U>
+                Reader::read_header_by_one_var::<U>
             }
         };
+        let gr = Reader::make_gen_readers(self)?;
         let mut headers = Vec::new();
         let mut samples = Vec::new();
         while self.cur_pos != self.end_of_data_pos {
             headers.push(read_hdrs_from_one(self, hdr_names)?);
-            samples.push((self.read_samples)(self)?);
+            samples.push((gr.read_samples)(self, gr.read_one_sample)?);
             self.cur_pos = self.file.stream_position()?;
         }
         Ok((headers, samples))
     }
-    pub fn read_samples_once(&mut self) -> Result<Vec<T>, Error> {
+    pub fn read_samples_once<T: Primitive + Clone>(&mut self) -> Result<Vec<T>, Error> {
         self.samp_buf
             .resize((self.samp_num * self.bytes_per_sample) as usize, 0u8);
-        (self.skip_headers)(self)?;
-        (self.read_samples)(self)
+        let gr = Reader::make_gen_readers(self)?;
+        (gr.skip_headers)(self)?;
+        (gr.read_samples)(self, gr.read_one_sample)
     }
     pub fn end_of_data(&self) -> bool {
         self.cur_pos == self.end_of_data_pos
@@ -303,36 +279,37 @@ impl<T: Primitive + Clone> Reader<T> {
                 0u8,
             );
             if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
-                Reader::<T>::read_header_by_group_fix::<U>
+                Reader::read_header_by_group_fix::<U>
             } else {
-                Reader::<T>::read_header_by_group_var::<U>
+                Reader::read_header_by_group_var::<U>
             }
         } else {
             if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
-                Reader::<T>::read_header_by_one_fix::<U>
+                Reader::read_header_by_one_fix::<U>
             } else {
-                Reader::<T>::read_header_by_one_var::<U>
+                Reader::read_header_by_one_var::<U>
             }
         };
         if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
-            Reader::<T>::read_all_headers_fix::<U>(self, read_hdrs_from_one, hdr_names)
+            Reader::read_all_headers_fix::<U>(self, read_hdrs_from_one, hdr_names)
         } else {
-            Reader::<T>::read_all_headers_var::<U>(self, read_hdrs_from_one, hdr_names)
+            Reader::read_all_headers_var::<U>(self, read_hdrs_from_one, hdr_names)
         }
     }
-    pub fn read_samples(&mut self) -> Result<Vec<Vec<T>>, Error> {
+    pub fn read_samples<T: Primitive + Clone>(&mut self) -> Result<Vec<Vec<T>>, Error> {
         self.samp_buf
             .resize((self.samp_num * self.bytes_per_sample) as usize, 0u8);
         self.rewind()?;
         let mut res = Vec::new();
+        let gr = Reader::make_gen_readers(self)?;
         while self.cur_pos != self.end_of_data_pos {
-            (self.skip_headers)(self)?;
-            res.push((self.read_samples)(self)?)
+            (gr.skip_headers)(self)?;
+            res.push((gr.read_samples)(self, gr.read_one_sample)?)
         }
         Ok(res)
     }
     /// has sence only for fixed trace length files
-    pub fn read_samples_1d(&mut self) -> Result<Vec<T>, Error> {
+    pub fn read_samples_1d<T: Primitive + Clone>(&mut self) -> Result<Vec<T>, Error> {
         if self.bh.fix_length_trc_flag == 0 && self.bh.segy_maj_ver != 0 {
             return Err(Error::NotFixLen());
         }
@@ -340,19 +317,20 @@ impl<T: Primitive + Clone> Reader<T> {
             .resize((self.samp_num * self.bytes_per_sample) as usize, 0u8);
         self.rewind()?;
         let mut res = Vec::new();
+        let gr = Reader::make_gen_readers(self)?;
         while self.cur_pos != self.end_of_data_pos {
-            (self.skip_headers)(self)?;
+            (gr.skip_headers)(self)?;
             self.file.read_exact(&mut self.samp_buf)?;
             let mut ptr: &[u8] = &self.samp_buf;
             for _ in 0..self.bh.samp_num {
-                res.push((self.read_one_sample)(&self, &mut ptr));
+                res.push((gr.read_one_sample)(&self, &mut ptr));
             }
             self.cur_pos = self.file.stream_position()?;
         }
         Ok(res)
     }
     /// has sence only for fixed trace length files
-    pub fn read_traces_1d<U: Primitive + Copy>(
+    pub fn read_traces_1d<U: Primitive + Copy, T: Primitive + Clone>(
         &mut self,
         hdr_names: &[i32],
     ) -> Result<(Vec<U>, Vec<T>), Error> {
@@ -380,28 +358,29 @@ impl<T: Primitive + Clone> Reader<T> {
                 (self.bh.max_add_trc_hdrs + 1) as usize * TRACE_HEADER_SIZE,
                 0u8,
             );
-            Reader::<T>::read_header_by_group_fix::<U>
+            Reader::read_header_by_group_fix::<U>
         } else {
-            Reader::<T>::read_header_by_one_fix::<U>
+            Reader::read_header_by_one_fix::<U>
         };
         let mut hdr = Vec::new();
         self.samp_buf
             .resize((self.samp_num * self.bytes_per_sample) as usize, 0u8);
         self.rewind()?;
         let mut samp = Vec::new();
+        let gr = Reader::make_gen_readers(self)?;
         while self.cur_pos != self.end_of_data_pos {
             hdr.extend(read_hdrs_from_one(self, hdr_names)?);
             self.file.read_exact(&mut self.samp_buf)?;
             let mut ptr: &[u8] = &self.samp_buf;
             for _ in 0..self.bh.samp_num {
-                samp.push((self.read_one_sample)(&self, &mut ptr));
+                samp.push((gr.read_one_sample)(&self, &mut ptr));
             }
             self.cur_pos = self.file.stream_position()?;
         }
         Ok((hdr, samp))
     }
     fn read_single_hdr_value<U: Primitive>(
-        reader: &mut Reader<T>,
+        reader: &mut Reader,
         hdr_fmt: TrcHdrFmt,
         offset: i32,
     ) -> Result<U, Error> {
@@ -472,14 +451,14 @@ impl<T: Primitive + Clone> Reader<T> {
         }
     }
     fn read_header_by_one_fix<U: Primitive>(
-        reader: &mut Reader<T>,
+        reader: &mut Reader,
         hdr_names: &[i32],
     ) -> Result<Vec<U>, Error> {
         let hdr_map = std_trc_hdr_map();
         let mut res_vec = Vec::with_capacity(hdr_names.len());
         for i in 0..hdr_names.len() {
             let (hdr_fmt, offset) = hdr_map[&hdr_names[i]];
-            let res = Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?;
+            let res = Reader::read_single_hdr_value(reader, hdr_fmt, offset)?;
             res_vec.push(res);
         }
         reader.cur_pos = reader.file.seek(io::SeekFrom::Start(
@@ -488,14 +467,14 @@ impl<T: Primitive + Clone> Reader<T> {
         Ok(res_vec)
     }
     fn read_header_by_one_var<U: Primitive>(
-        reader: &mut Reader<T>,
+        reader: &mut Reader,
         hdr_names: &[i32],
     ) -> Result<Vec<U>, Error> {
         let hdr_map = std_trc_hdr_map();
         let mut res_vec = Vec::with_capacity(hdr_names.len());
         let add_trc_hdrs_num: i16 = if reader.bh.max_add_trc_hdrs > 0 {
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::ADD_TRC_HDR_NUM];
-            Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?
+            Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
         } else {
             0
         };
@@ -512,7 +491,7 @@ impl<T: Primitive + Clone> Reader<T> {
             {
                 U::from_i32(0)
             } else {
-                Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?
+                Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
             };
             res_vec.push(res);
         }
@@ -522,7 +501,7 @@ impl<T: Primitive + Clone> Reader<T> {
         Ok(res_vec)
     }
     fn read_header_by_group_fix<U: Primitive>(
-        reader: &mut Reader<T>,
+        reader: &mut Reader,
         hdr_names: &[i32],
     ) -> Result<Vec<U>, Error> {
         let hdr_map = std_trc_hdr_map();
@@ -577,14 +556,14 @@ impl<T: Primitive + Clone> Reader<T> {
         Ok(res_vec)
     }
     fn read_header_by_group_var<U: Primitive>(
-        reader: &mut Reader<T>,
+        reader: &mut Reader,
         hdr_names: &[i32],
     ) -> Result<Vec<U>, Error> {
         let hdr_map = std_trc_hdr_map();
         let mut res_vec = Vec::with_capacity(hdr_names.len());
         let add_trc_hdrs_num: i16 = if reader.bh.max_add_trc_hdrs > 0 {
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::ADD_TRC_HDR_NUM];
-            Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?
+            Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
         } else {
             0
         };
@@ -653,8 +632,8 @@ impl<T: Primitive + Clone> Reader<T> {
         Ok(res_vec)
     }
     fn read_all_headers_fix<U: Primitive>(
-        reader: &mut Reader<T>,
-        read_fn: fn(&mut Reader<T>, &[i32]) -> Result<Vec<U>, Error>,
+        reader: &mut Reader,
+        read_fn: fn(&mut Reader, &[i32]) -> Result<Vec<U>, Error>,
         hdr_names: &[i32],
     ) -> Result<Vec<Vec<U>>, Error> {
         let mut res = Vec::new();
@@ -667,18 +646,18 @@ impl<T: Primitive + Clone> Reader<T> {
         Ok(res)
     }
     fn read_all_headers_var<U: Primitive>(
-        reader: &mut Reader<T>,
-        read_fn: fn(&mut Reader<T>, &[i32]) -> Result<Vec<U>, Error>,
+        reader: &mut Reader,
+        read_fn: fn(&mut Reader, &[i32]) -> Result<Vec<U>, Error>,
         hdr_names: &[i32],
     ) -> Result<Vec<Vec<U>>, Error> {
         let mut res = Vec::new();
         while reader.cur_pos != reader.end_of_data_pos {
             let hdr_map = std_trc_hdr_map();
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::SAMP_NUM];
-            let mut samp_num: i32 = Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?;
+            let mut samp_num: i32 = Reader::read_single_hdr_value(reader, hdr_fmt, offset)?;
             if reader.bh.max_add_trc_hdrs > 0 {
                 let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::EXT_SAMP_NUM];
-                let ext_samp_num = Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?;
+                let ext_samp_num = Reader::read_single_hdr_value(reader, hdr_fmt, offset)?;
                 if ext_samp_num > samp_num {
                     samp_num = ext_samp_num;
                 }
@@ -690,27 +669,30 @@ impl<T: Primitive + Clone> Reader<T> {
         }
         Ok(res)
     }
-    fn skip_headers_fix(reader: &mut Reader<T>) -> Result<(), Error> {
+    fn skip_headers_fix(reader: &mut Reader) -> Result<(), Error> {
         reader.cur_pos = reader.file.seek(io::SeekFrom::Current(
             (reader.bh.max_add_trc_hdrs + 1) as i64 * TRACE_HEADER_SIZE as i64,
         ))?;
         Ok(())
     }
-    fn read_samples_fix(reader: &mut Reader<T>) -> Result<Vec<T>, Error> {
+    fn read_samples_fix<T: Primitive + Clone>(
+        reader: &mut Reader,
+        read_one_sample: fn(&Reader, &mut &[u8]) -> T,
+    ) -> Result<Vec<T>, Error> {
         let mut result = vec![T::from_i32(0); reader.samp_num as usize];
         reader.file.read_exact(&mut reader.samp_buf)?;
         let mut ptr: &[u8] = &reader.samp_buf;
         for samp in result.iter_mut() {
-            *samp = (reader.read_one_sample)(&reader, &mut ptr);
+            *samp = read_one_sample(&reader, &mut ptr);
         }
         reader.cur_pos = reader.file.stream_position()?;
         Ok(result)
     }
-    fn skip_headers_var(reader: &mut Reader<T>) -> Result<(), Error> {
+    fn skip_headers_var(reader: &mut Reader) -> Result<(), Error> {
         let hdr_map = std_trc_hdr_map();
         let add_trc_hdr_num = if reader.bh.max_add_trc_hdrs > 0 {
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::ADD_TRC_HDR_NUM];
-            Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?
+            Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
         } else {
             0
         };
@@ -719,13 +701,16 @@ impl<T: Primitive + Clone> Reader<T> {
         ))?;
         Ok(())
     }
-    fn read_samples_var(reader: &mut Reader<T>) -> Result<Vec<T>, Error> {
+    fn read_samples_var<T: Primitive + Clone>(
+        reader: &mut Reader,
+        read_one_sample: fn(&Reader, &mut &[u8]) -> T,
+    ) -> Result<Vec<T>, Error> {
         let hdr_map = std_trc_hdr_map();
         let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::SAMP_NUM];
-        let mut samp_num: i32 = Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?;
+        let mut samp_num: i32 = Reader::read_single_hdr_value(reader, hdr_fmt, offset)?;
         if reader.bh.max_add_trc_hdrs > 0 {
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::EXT_SAMP_NUM];
-            let ext_samp_num: i32 = Reader::<T>::read_single_hdr_value(reader, hdr_fmt, offset)?;
+            let ext_samp_num: i32 = Reader::read_single_hdr_value(reader, hdr_fmt, offset)?;
             if ext_samp_num > samp_num {
                 samp_num = ext_samp_num;
             }
@@ -740,63 +725,94 @@ impl<T: Primitive + Clone> Reader<T> {
         let mut ptr: &[u8] = &reader.samp_buf;
         let mut result = vec![T::from_i32(0); samp_num as usize];
         for samp in result.iter_mut() {
-            *samp = (reader.read_one_sample)(&reader, &mut ptr);
+            *samp = read_one_sample(&reader, &mut ptr);
         }
         reader.cur_pos = reader.file.stream_position()?;
         Ok(result)
     }
-    fn sample_from_ibm_float(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn make_gen_readers<T: Primitive + Clone>(reader: &Reader) -> Result<GenReaders<T>, Error> {
+        let read_one_sample = match reader.bh.format_code {
+            1 => Reader::sample_from_ibm_float,
+            2 => Reader::sample_from_i32,
+            3 => Reader::sample_from_i16,
+            5 => Reader::sample_from_ieee_float,
+            6 => Reader::sample_from_ieee_double,
+            7 => Reader::sample_from_i24,
+            8 => Reader::sample_from_i8,
+            9 => Reader::sample_from_i64,
+            10 => Reader::sample_from_u32,
+            11 => Reader::sample_from_u16,
+            12 => Reader::sample_from_u64,
+            15 => Reader::sample_from_u24,
+            16 => Reader::sample_from_u8,
+            _ => return Err(Error::UnsupportedFormatCode(reader.bh.format_code)),
+        };
+        let (read_samples, skip_headers): (
+            fn(&mut Reader, fn(&Reader, &mut &[u8]) -> T) -> Result<Vec<T>, Error>,
+            fn(&mut Reader) -> Result<(), Error>,
+        ) = if reader.bh.fix_length_trc_flag == 1 || reader.bh.segy_maj_ver == 0 {
+            (Reader::read_samples_fix, Reader::skip_headers_fix)
+        } else {
+            (Reader::read_samples_var, Reader::skip_headers_var)
+        };
+        Ok(GenReaders {
+            skip_headers,
+            read_samples,
+            read_one_sample,
+        })
+    }
+    fn sample_from_ibm_float<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let bytes = (reader.read_u32)(buf);
         let sign = if bytes >> 31 == 1 { -1.0 } else { 1.0 };
         let exp = (bytes >> 24 & 0x7f) as i32;
         let fraction = bytes & 0x00ffffff;
         T::from_f64(fraction as f64 / 2f64.powi(24) * 16f64.powi(exp - 64) * sign)
     }
-    fn sample_from_i32(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_i32<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_i32)(buf);
         T::from_i32(value)
     }
-    fn sample_from_i16(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_i16<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_i16)(buf);
         T::from_i16(value)
     }
-    fn sample_from_ieee_float(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_ieee_float<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let bytes = (reader.read_u32)(buf);
         T::from_f32(f32::from_bits(bytes))
     }
-    fn sample_from_ieee_double(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_ieee_double<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let bytes = (reader.read_u64)(buf);
         T::from_f64(f64::from_bits(bytes))
     }
-    fn sample_from_i24(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_i24<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_i24)(buf);
         T::from_i32(value)
     }
-    fn sample_from_i8(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_i8<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_i8)(buf);
         T::from_i8(value)
     }
-    fn sample_from_i64(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_i64<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_i64)(buf);
         T::from_i64(value)
     }
-    fn sample_from_u32(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_u32<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_u32)(buf);
         T::from_u32(value)
     }
-    fn sample_from_u16(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_u16<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_u16)(buf);
         T::from_u16(value)
     }
-    fn sample_from_u64(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_u64<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_u64)(buf);
         T::from_u64(value)
     }
-    fn sample_from_u24(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_u24<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_u24)(buf);
         T::from_u32(value)
     }
-    fn sample_from_u8(reader: &Reader<T>, buf: &mut &[u8]) -> T {
+    fn sample_from_u8<T: Primitive>(reader: &Reader, buf: &mut &[u8]) -> T {
         let value = (reader.read_u8)(buf);
         T::from_u8(value)
     }
@@ -894,8 +910,7 @@ mod tests {
 
     #[test]
     fn test_text_header_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let text_header = sgy.read_text_header().expect("Problem opening the file");
         for slice in text_header.chunks(80) {
             let s = str::from_utf8(slice).expect("Invalid UTF-8 sequence");
@@ -906,7 +921,7 @@ mod tests {
     }
     #[test]
     fn test_bin_header_reading() {
-        let sgy = Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let bin_hdr = sgy.get_binary_header();
         println!("Job identification number: {}", bin_hdr.job_id);
         println!("Line number: {}", bin_hdr.line_num);
@@ -1001,8 +1016,7 @@ mod tests {
 
     #[test]
     fn test_trace_header_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let hdrs = sgy
             .read_headers::<i32>(&[trc_hdr_names::TRC_SEQ_SEGY, trc_hdr_names::OFFSET])
             .expect("Error on headers reading");
@@ -1019,38 +1033,34 @@ mod tests {
     }
     #[test]
     fn test_single_trace_samples_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let samples = sgy.read_samples_once().expect("Error on samples reading");
-        assert_eq!(-2.1558735e-14, samples[samples.len() - 1]);
+        assert_eq!(-2.1558735e-14f32, samples[samples.len() - 1]);
     }
     #[test]
     fn test_trace_samples_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let samples = sgy.read_samples().expect("Error on samples reading");
         for i in 0..160 {
-            assert_eq!(-2.1558735e-14, samples[i][samples[i].len() - 1 - i]);
+            assert_eq!(-2.1558735e-14f32, samples[i][samples[i].len() - 1 - i]);
         }
     }
     #[test]
     fn test_trace_samples_1d_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let samples = sgy.read_samples_1d().expect("Error on samples reading");
         let mut i = 0;
         for s in samples.chunks(sgy.bh.samp_num as usize) {
-            assert_eq!(-2.1558735e-14, s[(sgy.bh.samp_num - 1 - i) as usize]);
+            assert_eq!(-2.1558735e-14f32, s[(sgy.bh.samp_num - 1 - i) as usize]);
             i += 1;
         }
     }
     #[test]
     fn test_traces_1d_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let hdr_names: Vec<i32> = (0..90).collect();
         let (headers, samples) = sgy
-            .read_traces_1d::<i32>(&hdr_names)
+            .read_traces_1d::<i32, f32>(&hdr_names)
             .expect("Error on samples reading");
         let mut offset = 0;
         let mut chan = 1;
@@ -1100,17 +1110,16 @@ mod tests {
         assert_eq!(ref_vec, headers);
         let mut i = 0;
         for s in samples.chunks(sgy.bh.samp_num as usize) {
-            assert_eq!(-2.1558735e-14, s[(sgy.bh.samp_num - 1 - i) as usize]);
+            assert_eq!(-2.1558735e-14f32, s[(sgy.bh.samp_num - 1 - i) as usize]);
             i += 1;
         }
     }
     #[test]
     fn test_traces_reading() {
-        let mut sgy =
-            Reader::<f32>::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let hdr_names: Vec<i32> = (0..90).collect();
         let (headers, samples) = sgy
-            .read_traces::<i32>(&hdr_names)
+            .read_traces::<i32, f32>(&hdr_names)
             .expect("Error on samples reading");
         let mut offset = 0;
         let mut chan = 1;

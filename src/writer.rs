@@ -24,12 +24,12 @@ macro_rules! write_be {
     }};
 }
 
-pub struct Writer<T> {
+pub struct Writer {
     file: File,
     hdr_buf: Vec<u8>,
     samp_buf: Vec<u8>,
     wrt_fun: WrtFun,
-    write_one_sample: for<'a, 'b> fn(&'a WrtFun, &'b mut [u8], T) -> &'b mut [u8],
+    samp_format: i16,
     bytes_per_sample: usize,
     max_add_trc_hdrs: i32,
 }
@@ -47,7 +47,7 @@ struct WrtFun {
     write_i8: fn(&mut [u8], i8) -> &mut [u8],
 }
 
-impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
+impl Writer {
     pub fn create(
         path: &str,
         txt_hdr: &[u8; TEXT_HEADER_SIZE],
@@ -141,22 +141,6 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
         ptr = write_u64(ptr, bin_hdr.byte_off_of_first_trc);
         write_i32(ptr, bin_hdr.trailer_stanza_num);
         file.write_all(&bin_buf)?;
-        let write_one_sample = match bin_hdr.format_code {
-            1 => Writer::sample_as_ibm,
-            2 => Writer::sample_as_i32,
-            3 => Writer::sample_as_i16,
-            5 => Writer::sample_as_f32,
-            6 => Writer::sample_as_f64,
-            7 => Writer::sample_as_i24,
-            8 => Writer::sample_as_i8,
-            9 => Writer::sample_as_i64,
-            10 => Writer::sample_as_u32,
-            11 => Writer::sample_as_u16,
-            12 => Writer::sample_as_u64,
-            15 => Writer::sample_as_u24,
-            16 => Writer::sample_as_u8,
-            _ => return Err(Error::UnsupportedFormatCode(bin_hdr.format_code)),
-        };
         let hdr_buf = vec![0u8; TRACE_HEADER_SIZE * (bin_hdr.max_add_trc_hdrs + 1) as usize];
         let bytes_per_sample: usize = match bin_hdr.format_code {
             8 | 16 => 1,
@@ -188,13 +172,13 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
                 write_i16,
                 write_i8,
             },
-            write_one_sample,
+            samp_format: bin_hdr.format_code,
             bytes_per_sample,
             max_add_trc_hdrs: bin_hdr.max_add_trc_hdrs,
         })
     }
     pub fn close(self) {} // drop file
-    pub fn write_one_trace<U: Primitive + Copy>(
+    pub fn write_one_trace<U: Primitive + Copy, T: Primitive + Copy + std::cmp::PartialEq>(
         &mut self,
         hdr_names: &[i32],
         hdr_vals: &Vec<U>,
@@ -223,14 +207,15 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
             self.samp_buf
                 .resize(samples.len() * self.bytes_per_sample, 0u8);
         }
+        let write_one_sample = Writer::make_wrt_samp(self)?;
         let mut ptr = &mut self.samp_buf[..];
         for samp in samples {
-            ptr = (self.write_one_sample)(&self.wrt_fun, ptr, *samp);
+            ptr = write_one_sample(&self.wrt_fun, ptr, *samp);
         }
         self.file.write_all(&self.samp_buf)?;
         Ok(())
     }
-    pub fn write_traces<U: Primitive + Copy>(
+    pub fn write_traces<U: Primitive + Copy, T: Primitive + Copy + std::cmp::PartialEq>(
         &mut self,
         hdr_names: &[i32],
         data: (&Vec<Vec<U>>, &Vec<Vec<T>>),
@@ -276,15 +261,16 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
                 };
             }
             self.file.write_all(&self.hdr_buf)?;
+            let write_one_sample = Writer::make_wrt_samp(self)?;
             let mut ptr = &mut self.samp_buf[..];
             for samp in &samples[i] {
-                ptr = (self.write_one_sample)(&self.wrt_fun, ptr, *samp);
+                ptr = write_one_sample(&self.wrt_fun, ptr, *samp);
             }
             self.file.write_all(&self.samp_buf)?;
         }
         Ok(())
     }
-    pub fn write_traces_1d<U: Primitive + Copy>(
+    pub fn write_traces_1d<U: Primitive + Copy, T: Primitive + Copy + std::cmp::PartialEq>(
         &mut self,
         hdr_names: &[i32],
         data: (&Vec<U>, &Vec<T>),
@@ -354,15 +340,40 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
                 };
             }
             self.file.write_all(&self.hdr_buf)?;
+            let write_one_sample = Writer::make_wrt_samp(self)?;
             let mut ptr = &mut self.samp_buf[..];
             for j in 0..samp_num {
-                ptr = (self.write_one_sample)(&self.wrt_fun, ptr, samples[j + i * samp_num]);
+                ptr = write_one_sample(&self.wrt_fun, ptr, samples[j + i * samp_num]);
             }
             self.file.write_all(&self.samp_buf)?;
         }
         Ok(())
     }
-    fn sample_as_ibm<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn make_wrt_samp<T: Primitive + Clone + std::cmp::PartialEq>(
+        writer: &Writer,
+    ) -> Result<for<'a, 'b> fn(&'a WrtFun, &'b mut [u8], T) -> &'b mut [u8], Error> {
+        match writer.samp_format {
+            1 => Ok(Writer::sample_as_ibm),
+            2 => Ok(Writer::sample_as_i32),
+            3 => Ok(Writer::sample_as_i16),
+            5 => Ok(Writer::sample_as_f32),
+            6 => Ok(Writer::sample_as_f64),
+            7 => Ok(Writer::sample_as_i24),
+            8 => Ok(Writer::sample_as_i8),
+            9 => Ok(Writer::sample_as_i64),
+            10 => Ok(Writer::sample_as_u32),
+            11 => Ok(Writer::sample_as_u16),
+            12 => Ok(Writer::sample_as_u64),
+            15 => Ok(Writer::sample_as_u24),
+            16 => Ok(Writer::sample_as_u8),
+            _ => Err(Error::UnsupportedFormatCode(writer.samp_format)),
+        }
+    }
+    fn sample_as_ibm<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         if val == T::from_i32(0) {
             return (wrt_fun.write_u32)(buf, 0);
         }
@@ -374,40 +385,88 @@ impl<T: Primitive + Clone + Copy + std::cmp::PartialEq> Writer<T> {
         let result = sign << 31 | exp << 24 | (fraction & 0x00ffffff);
         (wrt_fun.write_u32)(buf, result)
     }
-    fn sample_as_f32<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_f32<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u32)(buf, T::as_f32(val).to_bits())
     }
-    fn sample_as_f64<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_f64<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u64)(buf, T::as_f64(val).to_bits())
     }
-    fn sample_as_u64<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_u64<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u64)(buf, T::as_u64(val))
     }
-    fn sample_as_i64<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_i64<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_i64)(buf, T::as_i64(val))
     }
-    fn sample_as_u32<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_u32<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u32)(buf, T::as_u32(val))
     }
-    fn sample_as_i32<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_i32<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_i32)(buf, T::as_i32(val))
     }
-    fn sample_as_u24<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_u24<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u24)(buf, T::as_u32(val))
     }
-    fn sample_as_i24<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_i24<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_i24)(buf, T::as_i32(val))
     }
-    fn sample_as_u16<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_u16<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u16)(buf, T::as_u16(val))
     }
-    fn sample_as_i16<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_i16<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_i16)(buf, T::as_i16(val))
     }
-    fn sample_as_u8<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_u8<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_u8)(buf, T::as_u8(val))
     }
-    fn sample_as_i8<'a, 'b>(wrt_fun: &'a WrtFun, buf: &'b mut [u8], val: T) -> &'b mut [u8] {
+    fn sample_as_i8<'a, 'b, T: Primitive + Clone + std::cmp::PartialEq>(
+        wrt_fun: &'a WrtFun,
+        buf: &'b mut [u8],
+        val: T,
+    ) -> &'b mut [u8] {
         (wrt_fun.write_i8)(buf, T::as_i8(val))
     }
 }
@@ -515,16 +574,16 @@ mod tests {
 
     #[test]
     fn test_write_traces() {
-        let mut isgy = crate::reader::Reader::<f32>::open("samples/ieee_single.sgy")
+        let mut isgy = crate::reader::Reader::open("samples/ieee_single.sgy")
             .expect("Problem opening file for reading");
         let txt_hdr = isgy
             .read_raw_text_header()
             .expect("Error on text header reading");
         let hdr_names: Vec<i32> = (0..90).collect();
         let (headers, samples) = isgy
-            .read_traces::<i32>(&hdr_names)
+            .read_traces::<i32, f32>(&hdr_names)
             .expect("Error on trace reading");
-        let mut osgy = Writer::<f32>::create(
+        let mut osgy = Writer::create(
             "samples/test_trc_wrt.sgy",
             &txt_hdr,
             isgy.get_binary_header().clone(),
@@ -543,16 +602,16 @@ mod tests {
     }
     #[test]
     fn test_write_traces_1d() {
-        let mut isgy = crate::reader::Reader::<f32>::open("samples/ieee_single.sgy")
+        let mut isgy = crate::reader::Reader::open("samples/ieee_single.sgy")
             .expect("Problem opening file for reading");
         let txt_hdr = isgy
             .read_raw_text_header()
             .expect("Error on text header reading");
         let hdr_names: Vec<i32> = (0..90).collect();
         let (headers, samples) = isgy
-            .read_traces_1d::<i32>(&hdr_names)
+            .read_traces_1d::<i32, f32>(&hdr_names)
             .expect("Error on trace reading");
-        let mut osgy = Writer::<f32>::create(
+        let mut osgy = Writer::create(
             "samples/test_trc_wrt_1d.sgy",
             &txt_hdr,
             isgy.get_binary_header().clone(),
