@@ -234,7 +234,9 @@ impl Reader {
         let mut headers = Vec::new();
         let mut samples = Vec::new();
         while self.cur_pos != self.end_of_data_pos {
-            headers.push(read_hdrs_from_one(self, hdr_names)?);
+            let mut v = Vec::with_capacity(hdr_names.len());
+            read_hdrs_from_one(self, hdr_names, &mut v)?;
+            headers.push(v);
             samples.push((gr.read_samples)(self, gr.read_one_sample)?);
             self.cur_pos = self.file.stream_position()?;
         }
@@ -369,7 +371,7 @@ impl Reader {
         let mut samp = Vec::new();
         let gr = Reader::make_gen_readers(self)?;
         while self.cur_pos != self.end_of_data_pos {
-            hdr.extend(read_hdrs_from_one(self, hdr_names)?);
+            read_hdrs_from_one(self, hdr_names, &mut hdr)?;
             self.file.read_exact(&mut self.samp_buf)?;
             let mut ptr: &[u8] = &self.samp_buf;
             for _ in 0..self.bh.samp_num {
@@ -378,6 +380,50 @@ impl Reader {
             self.cur_pos = self.file.stream_position()?;
         }
         Ok((hdr, samp))
+    }
+    pub fn read_headers_1d<U: Primitive>(&mut self, hdr_names: &[i32]) -> Result<Vec<U>, Error> {
+        self.rewind()?;
+        let hdr_map = std_trc_hdr_map();
+        for hn in hdr_names {
+            if hdr_map.contains_key(hn) == false {
+                return Err(Error::NoSuchHeader(*hn));
+            }
+            let (format, offset) = hdr_map[&hn];
+            let format_size = match format {
+                TrcHdrFmt::I8 | TrcHdrFmt::U8 => 1,
+                TrcHdrFmt::I16 | TrcHdrFmt::U16 => 2,
+                TrcHdrFmt::I32 | TrcHdrFmt::U32 | TrcHdrFmt::F32 => 4,
+                TrcHdrFmt::I64 | TrcHdrFmt::U64 | TrcHdrFmt::F64 => 8,
+            };
+            if offset + format_size > TRACE_HEADER_SIZE as i32 * (self.bh.max_add_trc_hdrs + 1) {
+                return Err(Error::TraceHeaderMap(*hn));
+            }
+        }
+        let read_hdrs_from_one = if hdr_names.len() > hdr_map.len() * 5 / 100 {
+            self.hdr_buf.resize(
+                (self.bh.max_add_trc_hdrs + 1) as usize * TRACE_HEADER_SIZE,
+                0u8,
+            );
+            if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
+                Reader::read_header_by_group_fix::<U>
+            } else {
+                Reader::read_header_by_group_var::<U>
+            }
+        } else {
+            if self.bh.fix_length_trc_flag == 1 || self.bh.segy_maj_ver == 0 {
+                Reader::read_header_by_one_fix::<U>
+            } else {
+                Reader::read_header_by_one_var::<U>
+            }
+        };
+        let mut res = Vec::new();
+        while self.cur_pos != self.end_of_data_pos {
+            read_hdrs_from_one(self, hdr_names, &mut res)?;
+            self.cur_pos = self.file.seek(io::SeekFrom::Current(
+                (self.samp_num * self.bytes_per_sample) as i64,
+            ))?;
+        }
+        Ok(res)
     }
     fn read_single_hdr_value<U: Primitive>(
         reader: &mut Reader,
@@ -453,25 +499,25 @@ impl Reader {
     fn read_header_by_one_fix<U: Primitive>(
         reader: &mut Reader,
         hdr_names: &[i32],
-    ) -> Result<Vec<U>, Error> {
+        storage: &mut Vec<U>,
+    ) -> Result<(), Error> {
         let hdr_map = std_trc_hdr_map();
-        let mut res_vec = Vec::with_capacity(hdr_names.len());
         for i in 0..hdr_names.len() {
             let (hdr_fmt, offset) = hdr_map[&hdr_names[i]];
             let res = Reader::read_single_hdr_value(reader, hdr_fmt, offset)?;
-            res_vec.push(res);
+            storage.push(res);
         }
         reader.cur_pos = reader.file.seek(io::SeekFrom::Start(
             reader.cur_pos + (reader.bh.max_add_trc_hdrs + 1) as u64 * TRACE_HEADER_SIZE as u64,
         ))?;
-        Ok(res_vec)
+        Ok(())
     }
     fn read_header_by_one_var<U: Primitive>(
         reader: &mut Reader,
         hdr_names: &[i32],
-    ) -> Result<Vec<U>, Error> {
+        storage: &mut Vec<U>,
+    ) -> Result<(), Error> {
         let hdr_map = std_trc_hdr_map();
-        let mut res_vec = Vec::with_capacity(hdr_names.len());
         let add_trc_hdrs_num: i16 = if reader.bh.max_add_trc_hdrs > 0 {
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::ADD_TRC_HDR_NUM];
             Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
@@ -493,19 +539,19 @@ impl Reader {
             } else {
                 Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
             };
-            res_vec.push(res);
+            storage.push(res);
         }
         reader.cur_pos = reader.file.seek(io::SeekFrom::Start(
             reader.cur_pos + (add_trc_hdrs_num + 1) as u64 * TRACE_HEADER_SIZE as u64,
         ))?;
-        Ok(res_vec)
+        Ok(())
     }
     fn read_header_by_group_fix<U: Primitive>(
         reader: &mut Reader,
         hdr_names: &[i32],
-    ) -> Result<Vec<U>, Error> {
+        storage: &mut Vec<U>,
+    ) -> Result<(), Error> {
         let hdr_map = std_trc_hdr_map();
-        let mut res_vec = Vec::with_capacity(hdr_names.len());
         reader.file.read_exact(&mut reader.hdr_buf)?;
         for hdr_name in hdr_names {
             let (hdr_fmt, offset) = hdr_map[hdr_name];
@@ -551,16 +597,16 @@ impl Reader {
                     U::from_f64(f64::from_bits(val))
                 }
             };
-            res_vec.push(res);
+            storage.push(res);
         }
-        Ok(res_vec)
+        Ok(())
     }
     fn read_header_by_group_var<U: Primitive>(
         reader: &mut Reader,
         hdr_names: &[i32],
-    ) -> Result<Vec<U>, Error> {
+        storage: &mut Vec<U>,
+    ) -> Result<(), Error> {
         let hdr_map = std_trc_hdr_map();
-        let mut res_vec = Vec::with_capacity(hdr_names.len());
         let add_trc_hdrs_num: i16 = if reader.bh.max_add_trc_hdrs > 0 {
             let (hdr_fmt, offset) = hdr_map[&trc_hdr_names::ADD_TRC_HDR_NUM];
             Reader::read_single_hdr_value(reader, hdr_fmt, offset)?
@@ -627,18 +673,20 @@ impl Reader {
                     }
                 }
             };
-            res_vec.push(res);
+            storage.push(res);
         }
-        Ok(res_vec)
+        Ok(())
     }
     fn read_all_headers_fix<U: Primitive>(
         reader: &mut Reader,
-        read_fn: fn(&mut Reader, &[i32]) -> Result<Vec<U>, Error>,
+        read_fn: fn(&mut Reader, &[i32], &mut Vec<U>) -> Result<(), Error>,
         hdr_names: &[i32],
     ) -> Result<Vec<Vec<U>>, Error> {
         let mut res = Vec::new();
         while reader.cur_pos != reader.end_of_data_pos {
-            res.push(read_fn(reader, hdr_names)?);
+            let mut v = Vec::with_capacity(hdr_names.len());
+            read_fn(reader, hdr_names, &mut v)?;
+            res.push(v);
             reader.cur_pos = reader.file.seek(io::SeekFrom::Current(
                 (reader.samp_num * reader.bytes_per_sample) as i64,
             ))?;
@@ -647,7 +695,7 @@ impl Reader {
     }
     fn read_all_headers_var<U: Primitive>(
         reader: &mut Reader,
-        read_fn: fn(&mut Reader, &[i32]) -> Result<Vec<U>, Error>,
+        read_fn: fn(&mut Reader, &[i32], &mut Vec<U>) -> Result<(), Error>,
         hdr_names: &[i32],
     ) -> Result<Vec<Vec<U>>, Error> {
         let mut res = Vec::new();
@@ -662,7 +710,9 @@ impl Reader {
                     samp_num = ext_samp_num;
                 }
             }
-            res.push(read_fn(reader, hdr_names)?);
+            let mut v = Vec::with_capacity(hdr_names.len());
+            read_fn(reader, hdr_names, &mut v)?;
+            res.push(v);
             reader.cur_pos = reader.file.seek(io::SeekFrom::Current(
                 (samp_num * reader.bytes_per_sample) as i64,
             ))?;
@@ -1113,6 +1163,60 @@ mod tests {
             assert_eq!(-2.1558735e-14f32, s[(sgy.bh.samp_num - 1 - i) as usize]);
             i += 1;
         }
+    }
+    #[test]
+    fn test_headers_1d_reading() {
+        let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
+        let hdr_names: Vec<i32> = (0..90).collect();
+        let headers = sgy
+            .read_headers_1d::<i32>(&hdr_names)
+            .expect("Error on samples reading");
+        let mut offset = 0;
+        let mut chan = 1;
+        let mut esp = 0;
+        let mut sou_y = -50;
+        let mut stat = 0;
+        let mut ref_vec = Vec::new();
+        for j in 0..160 {
+            ref_vec.push(j + 1);
+            ref_vec.push(j + 1);
+            ref_vec.push(0);
+            if j % 40 == 0 {
+                offset = 0;
+                chan = 1;
+                esp += 1;
+                sou_y += 50;
+            }
+            ref_vec.push(chan);
+            ref_vec.push(esp);
+            ref_vec.append(&mut vec![0; 2]);
+            ref_vec.push(1);
+            ref_vec.push(0);
+            ref_vec.push(1);
+            ref_vec.push(0);
+            ref_vec.push(offset);
+            ref_vec.append(&mut vec![0; 7]);
+            ref_vec.append(&mut vec![1; 2]);
+            ref_vec.push(0);
+            ref_vec.push(sou_y);
+            ref_vec.push(offset);
+            ref_vec.push(sou_y);
+            ref_vec.push(3);
+            ref_vec.append(&mut vec![0; 6]);
+            ref_vec.push(stat * 2);
+            ref_vec.append(&mut vec![0; 3]);
+            ref_vec.push(stat);
+            ref_vec.push(stat);
+            ref_vec.push(501);
+            ref_vec.push(2000);
+            ref_vec.append(&mut vec![0; 42]);
+            ref_vec.push(1);
+            ref_vec.append(&mut vec![0; 7]);
+            offset += 50;
+            chan += 1;
+            stat -= 2;
+        }
+        assert_eq!(ref_vec, headers);
     }
     #[test]
     fn test_traces_reading() {
