@@ -273,7 +273,7 @@ impl Writer {
     pub fn write_traces_1d<U: Primitive + Copy, T: Primitive + Copy + std::cmp::PartialEq>(
         &mut self,
         hdr_names: &[i32],
-        data: (&Vec<U>, &Vec<T>),
+        data: (&[U], &[T]),
     ) -> Result<(), Error> {
         let trc_num = data.0.len() / hdr_names.len();
         let hdr_size = hdr_names.len();
