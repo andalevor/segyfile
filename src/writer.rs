@@ -218,9 +218,10 @@ impl Writer {
     pub fn write_traces<U: Primitive + Copy, T: Primitive + Copy + std::cmp::PartialEq>(
         &mut self,
         hdr_names: &[i32],
-        data: (&Vec<Vec<U>>, &Vec<Vec<T>>),
+        hdr_vals: &Vec<Vec<U>>,
+        samples: &Vec<Vec<T>>,
     ) -> Result<(), Error> {
-        if data.0.len() != data.1.len() || data.0[0].len() != hdr_names.len() {
+        if hdr_vals.len() != samples.len() || hdr_vals[0].len() != hdr_names.len() {
             return Err(Error::DiffDimToWrite());
         }
         let hdr_map = std_trc_hdr_map();
@@ -236,8 +237,6 @@ impl Writer {
                 return Err(Error::TraceHeaderMap(i as i32));
             }
         }
-        let hdr_vals = &data.0;
-        let samples = &data.1;
         for i in 0..hdr_vals.len() {
             for (j, hn) in hdr_names.iter().enumerate() {
                 let (fmt, offset) = hdr_map[hn];
@@ -273,14 +272,15 @@ impl Writer {
     pub fn write_traces_1d<U: Primitive + Copy, T: Primitive + Copy + std::cmp::PartialEq>(
         &mut self,
         hdr_names: &[i32],
-        data: (&[U], &[T]),
+        headers: &[U],
+        samples: &[T],
     ) -> Result<(), Error> {
-        let trc_num = data.0.len() / hdr_names.len();
+        let trc_num = headers.len() / hdr_names.len();
         let hdr_size = hdr_names.len();
         let samp_num = self.samp_buf.len() / self.bytes_per_sample;
-        if data.0.len() % hdr_names.len() != 0
-            || data.1.len() % samp_num != 0
-            || trc_num != data.1.len() / samp_num
+        if headers.len() % hdr_names.len() != 0
+            || samples.len() % samp_num != 0
+            || trc_num != samples.len() / samp_num
         {
             return Err(Error::WriteDim1d());
         }
@@ -297,8 +297,6 @@ impl Writer {
                 return Err(Error::TraceHeaderMap(i as i32));
             }
         }
-        let hdr_vals = data.0;
-        let samples = data.1;
         for i in 0..trc_num {
             for (j, hn) in hdr_names.iter().enumerate() {
                 let (fmt, offset) = hdr_map[hn];
@@ -306,36 +304,36 @@ impl Writer {
                 let ptr = &mut self.hdr_buf[offset..];
                 _ = match fmt {
                     TrcHdrFmt::I8 => {
-                        (self.wrt_fun.write_i8)(ptr, U::as_i8(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_i8)(ptr, U::as_i8(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::I16 => {
-                        (self.wrt_fun.write_i16)(ptr, U::as_i16(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_i16)(ptr, U::as_i16(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::I32 => {
-                        (self.wrt_fun.write_i32)(ptr, U::as_i32(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_i32)(ptr, U::as_i32(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::I64 => {
-                        (self.wrt_fun.write_i64)(ptr, U::as_i64(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_i64)(ptr, U::as_i64(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::U8 => {
-                        (self.wrt_fun.write_u8)(ptr, U::as_u8(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_u8)(ptr, U::as_u8(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::U16 => {
-                        (self.wrt_fun.write_u16)(ptr, U::as_u16(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_u16)(ptr, U::as_u16(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::U32 => {
-                        (self.wrt_fun.write_u32)(ptr, U::as_u32(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_u32)(ptr, U::as_u32(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::U64 => {
-                        (self.wrt_fun.write_u64)(ptr, U::as_u64(hdr_vals[j + i * hdr_size]))
+                        (self.wrt_fun.write_u64)(ptr, U::as_u64(headers[j + i * hdr_size]))
                     }
                     TrcHdrFmt::F32 => (self.wrt_fun.write_u32)(
                         ptr,
-                        U::as_f32(hdr_vals[j + i * hdr_size]).to_bits(),
+                        U::as_f32(headers[j + i * hdr_size]).to_bits(),
                     ),
                     TrcHdrFmt::F64 => (self.wrt_fun.write_u64)(
                         ptr,
-                        U::as_f64(hdr_vals[j + i * hdr_size]).to_bits(),
+                        U::as_f64(headers[j + i * hdr_size]).to_bits(),
                     ),
                 };
             }
@@ -589,7 +587,7 @@ mod tests {
             isgy.get_binary_header().clone(),
         )
         .expect("Problem creating file for writing");
-        osgy.write_traces(&hdr_names, (&headers, &samples))
+        osgy.write_traces(&hdr_names, &headers, &samples)
             .expect("Error on traces writing");
         osgy.close();
         isgy.close();
@@ -617,7 +615,7 @@ mod tests {
             isgy.get_binary_header().clone(),
         )
         .expect("Problem creating file for writing");
-        osgy.write_traces_1d(&hdr_names, (&headers, &samples))
+        osgy.write_traces_1d(&hdr_names, &headers, &samples)
             .expect("Error on traces writing");
         osgy.close();
         isgy.close();
