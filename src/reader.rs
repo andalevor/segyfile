@@ -889,7 +889,7 @@ fn get_first_trace_pos(file: &mut File, ext_txt_hdrs_num: i16) -> Result<u64, Er
         loop {
             file.read_exact(&mut buf)?;
             pos += TEXT_HEADER_SIZE as u64;
-            let hdr = str::from_utf8(&buf)?;
+            let hdr = std::str::from_utf8(&buf)?;
             if hdr.starts_with("((SEG: EndText))") {
                 break;
             }
@@ -963,7 +963,7 @@ mod tests {
         let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
         let text_header = sgy.read_text_header().expect("Problem opening the file");
         for slice in text_header.chunks(80) {
-            let s = str::from_utf8(slice).expect("Invalid UTF-8 sequence");
+            let s = std::str::from_utf8(slice).expect("Invalid UTF-8 sequence");
             println!("{}", s);
         }
         let s = std::str::from_utf8(&text_header).expect("Invalid UTF-8 sequence");
