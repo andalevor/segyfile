@@ -1084,8 +1084,12 @@ mod tests {
     #[test]
     fn test_single_trace_samples_reading() {
         let mut sgy = Reader::open("samples/ieee_single.sgy").expect("Problem opening the file");
-        let samples = sgy.read_samples_once().expect("Error on samples reading");
-        assert_eq!(-2.1558735e-14f32, samples[samples.len() - 1]);
+        let mut i = 0;
+        while sgy.end_of_data() != true {
+            let samples = sgy.read_samples_once().expect("Error on samples reading");
+            assert_eq!(-2.1558735e-14f32, samples[samples.len() - 1 - i]);
+            i += 1;
+        }
     }
     #[test]
     fn test_trace_samples_reading() {
